@@ -1,0 +1,6 @@
+{
+  "protocol": "kssw",
+  "apis": [
+    {"version": "1", "base": "/bbs/api"}
+  ]
+}

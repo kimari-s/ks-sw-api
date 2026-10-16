@@ -1,0 +1,52 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The kssw conformance suite comes from ks-sw-spec at the commit pinned in
+# spec.lock, whose url= is the public repository: the jobs that need it work
+# once ks-sw-spec is public (a private one would need a token).
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Schema copy is in sync
+        run: make check-schema
+      - name: php -l (7.4, 8.3)
+        run: make lint-php
+      - name: Python syntax (CLI on 3.8 is tested below)
+        run: python3 -m py_compile tools/kssw-admin tests/client.py
+
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - test-php74             # php -S on 7.4 + the CLI on python:3.8
+          - test-php83             # php -S on 8.3, file-copy backup
+          - test-apache            # php:7.4-apache + .htaccess
+          - test-admin-disabled
+          - test-admin-https
+          - test-trusted-proxy
+          - test-forwarded-proto
+          - test-old-php           # PHP 5.6 / 7.0 / 7.3 answer a version error
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # test-php74 / -php83 / -apache / -admin-disabled first run `make spec`
+      # (ks-sw-spec at the pinned commit); the others need only tests/.
+      - name: make ${{ matrix.target }}
+        run: make ${{ matrix.target }}

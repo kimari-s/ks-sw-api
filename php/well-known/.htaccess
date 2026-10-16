@@ -1,0 +1,10 @@
+# For <document root>/.well-known/ (Apache): serve the kssw discovery
+# document as JSON, readable from any page. If .well-known/ already has an
+# .htaccess (e.g. for certificates), append these lines to it instead.
+<Files "kssw">
+    ForceType application/json
+    <IfModule mod_headers.c>
+        Header set Access-Control-Allow-Origin "*"
+        Header set Cache-Control "max-age=3600"
+    </IfModule>
+</Files>

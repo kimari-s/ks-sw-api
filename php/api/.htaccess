@@ -1,0 +1,36 @@
+# ks-sw-api — Apache config (mod_rewrite; mod_php or PHP-FPM/FastCGI).
+#
+# Deploy php/api/ as a directory under the document root, e.g.
+# public_html/api/. Public URLs then are https://example.com/api/v1/...
+
+Options -Indexes
+DirectoryIndex index.php
+
+# Settings, schema, the database and the example config are read by PHP only.
+<FilesMatch "^(config\.php|config\.example\.php)$|\.(sql|sqlite3|sqlite3-journal|sqlite3-wal|sqlite3-shm|md)$">
+    Require all denied
+</FilesMatch>
+
+RewriteEngine On
+# Needed only when the directory is reached through an Alias; then set it
+# to the URL path of this directory.
+# RewriteBase /api/
+
+# Pass the Authorization header (the admin API's bearer token) to PHP under
+# CGI / FastCGI, which drop it otherwise. PHP reads HTTP_AUTHORIZATION or,
+# after the rewrite below, REDIRECT_HTTP_AUTHORIZATION.
+RewriteCond %{HTTP:Authorization} .
+RewriteRule ^ - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+# lib/ and data/ are never served.
+RewriteRule ^(lib|data)(/|$) - [F,L]
+
+# /…/api/v1/<path> -> index.php?__route=/v1/<path> (query string kept).
+# A query parameter rather than PATH_INFO: it survives every PHP SAPI
+# (mod_php, CGI, FastCGI) whatever cgi.fix_pathinfo says.
+RewriteRule ^(v1(/.*)?)$ index.php?__route=/$1 [B,L,QSA]
+
+# /…/api/.well-known/kssw -> the discovery document (kssw spec §6). It is
+# meant to be at the host root: see ../well-known/README.md for the rewrite
+# or static file that puts it there.
+RewriteRule ^\.well-known/kssw$ index.php?__route=/.well-known/kssw [L,QSA]

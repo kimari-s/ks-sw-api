@@ -1,0 +1,617 @@
+#!/usr/bin/env python3
+"""kssw-admin: administer a kssw board through its admin API.
+
+Runs on your (or your agent's) machine; talks HTTPS to the board. Python 3.8+,
+standard library only. Protocol: the kssw admin API (ks-sw-spec,
+openapi/kssw-admin.openapi.yaml); works with any server that implements it.
+
+    export KSSW_URL=https://example.com/bbs/api      # the board API base
+    export KSSW_ADMIN_TOKEN=...                       # from `kssw-admin token new`
+    kssw-admin capabilities
+    kssw-admin posts list --q spam --status active
+    kssw-admin posts delete --dry-run <id> <id>
+    kssw-admin commands                               # every command, machine-readable
+
+Output: one JSON document on stdout (`--format table` for people). Errors: one
+JSON document on stderr, {"error": {"code", "message", "status"}}. Exit codes:
+0 ok, 1 usage / bad request, 2 auth (401, 403, 429), 3 not found,
+4 conflict / maintenance, 5 server / network. Never prompts; never prints
+the token (except `token new`, whose job that is).
+"""
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import secrets
+import socket
+import ssl
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+
+VERSION = "0.2.0-alpha.1"
+IDS_PER_REQUEST = 100  # the server's limits.ids_max; the CLI batches
+
+EXIT_OK, EXIT_USAGE, EXIT_AUTH, EXIT_NOT_FOUND, EXIT_CONFLICT, EXIT_SERVER = 0, 1, 2, 3, 4, 5
+EXIT_CODES = {
+    "0": "ok",
+    "1": "usage error or request rejected as malformed (HTTP 400, 422)",
+    "2": "authentication: missing / wrong token, HTTPS required, rate limited (HTTP 401, 403, 429)",
+    "3": "not found: a post id, or the admin API is not enabled at this URL (HTTP 404)",
+    "4": "conflict or maintenance state (HTTP 409, 503), local file exists",
+    "5": "server error, network error or unexpected response (HTTP 5xx, other)",
+}
+
+
+class CliError(Exception):
+    def __init__(self, exit_code, code, message, status=None, extra=None):
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.code = code
+        self.message = message
+        self.status = status
+        self.extra = extra or {}
+
+
+def status_exit(status):
+    if status in (400, 405, 413, 422):
+        return EXIT_USAGE
+    if status in (401, 403, 429):
+        return EXIT_AUTH
+    if status == 404:
+        return EXIT_NOT_FOUND
+    if status in (409, 503):
+        return EXIT_CONFLICT
+    return EXIT_SERVER
+
+
+# ---- HTTP ---------------------------------------------------------------
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # Never follow a redirect: it would carry the token to wherever it points.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class Client:
+    def __init__(self, url, token, timeout, allow_http, tls_compat=False):
+        if not url:
+            raise CliError(EXIT_USAGE, "missing_url", "set KSSW_URL or --url (the board API base, e.g. https://example.com/bbs/api)")
+        u = urllib.parse.urlsplit(url)
+        if u.scheme not in ("http", "https") or not u.netloc:
+            raise CliError(EXIT_USAGE, "bad_url", "the URL must start with https:// (got %r)" % url)
+        if u.scheme == "http" and not allow_http and u.hostname not in ("localhost", "127.0.0.1", "::1"):
+            raise CliError(EXIT_USAGE, "http_refused", "refusing to send the admin token over plain http to %s; use https:// (or --allow-http for a test server)" % u.hostname)
+        self.base = url.rstrip("/")
+        if self.base.endswith("/v1"):
+            self.base = self.base[:-3]
+        self.token = token
+        self.timeout = timeout
+        ctx = ssl.create_default_context()
+        if tls_compat:
+            # Some shared hosts (e.g. XREA's shared SSL) only offer RSA key
+            # exchange, which Python's default cipher list excludes. Widen
+            # the list to OpenSSL's defaults; certificate checks stay on.
+            ctx.set_ciphers("DEFAULT")
+        self.tls_compat = tls_compat
+        self.opener = urllib.request.build_opener(_NoRedirect, urllib.request.HTTPSHandler(context=ctx))
+
+    def request(self, method, path, query=None, body=None, auth=True, raw=False, probing=False):
+        url = self.base + path
+        if query:
+            q = [(k, v) for k, v in query if v is not None]
+            if q:
+                url += "?" + urllib.parse.urlencode(q)
+        headers = {"Accept": "application/json", "User-Agent": "kssw-admin/" + VERSION}
+        if auth:
+            if not self.token:
+                raise CliError(EXIT_USAGE, "missing_token", "set KSSW_ADMIN_TOKEN, --token-file or --token")
+            headers["Authorization"] = "Bearer " + self.token
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        try:
+            resp = self.opener.open(req, timeout=self.timeout)
+        except urllib.error.HTTPError as e:
+            return self._error(e, probing)
+        except (urllib.error.URLError, socket.timeout, ConnectionError, ssl.SSLError) as e:
+            reason = getattr(e, "reason", e)
+            msg = "cannot reach %s: %s" % (self.base, reason)
+            if isinstance(reason, ssl.SSLError) and "HANDSHAKE_FAILURE" in str(reason) and not self.tls_compat:
+                msg += " (the server may only offer older TLS cipher suites; retry with --tls-compat or KSSW_TLS_COMPAT=1)"
+            raise CliError(EXIT_SERVER, "network", msg)
+        if raw:
+            return resp
+        with resp:
+            payload = resp.read()
+        try:
+            return json.loads(payload.decode("utf-8"))
+        except ValueError:
+            raise CliError(EXIT_SERVER, "bad_response", "the server did not answer JSON (HTTP %d); is %s the API base?" % (resp.status, self.base), resp.status)
+
+    def _error(self, e, probing):
+        status = e.code
+        if 300 <= status < 400:
+            raise CliError(EXIT_SERVER, "redirect", "the server redirects to %s; use that URL as KSSW_URL (redirects are not followed)" % e.headers.get("Location"), status)
+        try:
+            payload = e.read()
+        finally:
+            e.close()
+        detail, code = None, None
+        try:
+            j = json.loads(payload.decode("utf-8"))
+            if isinstance(j, dict):
+                detail, code = j.get("detail"), j.get("code")
+        except ValueError:
+            pass
+        extra = {}
+        if e.headers.get("Retry-After"):
+            extra["retry_after"] = e.headers.get("Retry-After")
+        if status == 404 and code != "post_not_found" and not probing:
+            code, detail = self._why_404()
+        raise CliError(status_exit(status), code or "http_%d" % status, detail or "HTTP %d" % status, status, extra)
+
+    def _why_404(self):
+        """A 404 that is not a missing post: is the admin API off, or the URL wrong?"""
+        try:
+            meta = self.request("GET", "/v1/meta", auth=False, probing=True)
+        except CliError:
+            return "wrong_url", "no kssw API at %s (GET /v1/meta failed); KSSW_URL must be the API base, e.g. https://example.com/bbs/api" % self.base
+        if isinstance(meta, dict) and "admin" not in (meta.get("features") or []):
+            return "admin_disabled", "the admin API is not enabled on this server: set admin_token_sha256 in config.php (kssw-admin token new)"
+        return "not_found", "not found (this server may not implement this operation; see kssw-admin capabilities)"
+
+
+# ---- input helpers ------------------------------------------------------
+
+
+def read_token(a):
+    if getattr(a, "token", None):
+        return a.token.strip()
+    path = getattr(a, "token_file", None) or os.environ.get("KSSW_ADMIN_TOKEN_FILE")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError as e:
+            raise CliError(EXIT_USAGE, "token_file", "cannot read the token file: %s" % e.strerror)
+    return os.environ.get("KSSW_ADMIN_TOKEN", "").strip()
+
+
+def ids_from_stdin():
+    """Ids on stdin: whitespace-separated, or JSON (a `posts list` result,
+    a list of ids, or a list of posts)."""
+    text = sys.stdin.read()
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return text.split()
+    if isinstance(doc, dict):
+        doc = doc.get("items", doc.get("results", [doc]))
+    out = []
+    for x in doc if isinstance(doc, list) else [doc]:
+        if isinstance(x, str):
+            out.append(x)
+        elif isinstance(x, dict) and isinstance(x.get("id"), str):
+            out.append(x["id"])
+        else:
+            raise CliError(EXIT_USAGE, "bad_stdin", "stdin JSON must be ids, posts, or a posts list result")
+    return out
+
+
+def collect_ids(a):
+    ids = list(a.ids)
+    if a.stdin or ids == ["-"]:
+        ids = [i for i in ids if i != "-"] + ids_from_stdin()
+    seen, out = set(), []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    if not out:
+        raise CliError(EXIT_USAGE, "no_ids", "give post ids as arguments, or --stdin")
+    return out
+
+
+# ---- commands ------------------------------------------------------------
+
+
+def cmd_capabilities(c, a):
+    return c.request("GET", "/v1/admin/capabilities"), EXIT_OK
+
+
+def post_query(a, page):
+    q = [("q", a.q), ("author", a.author), ("status", a.status), ("root_id", a.root),
+         ("since", a.since), ("until", a.until), ("page", str(page)), ("page_size", str(a.page_size))]
+    q += [("tags", t) for t in a.tag or []]
+    return q
+
+
+def cmd_posts_list(c, a):
+    if not a.all:
+        return c.request("GET", "/v1/admin/posts", post_query(a, a.page)), EXIT_OK
+    items, page, total = [], a.page, 0
+    while True:
+        r = c.request("GET", "/v1/admin/posts", post_query(a, page))
+        items += r["items"]
+        total = r["total"]
+        if not r["has_more"] or (a.limit and len(items) >= a.limit):
+            break
+        page += 1
+    if a.limit:
+        items = items[: a.limit]
+    return {"items": items, "page": a.page, "page_size": a.page_size, "total": total, "has_more": (a.page - 1) * a.page_size + len(items) < total}, EXIT_OK
+
+
+def cmd_posts_get(c, a):
+    return c.request("GET", "/v1/admin/posts/" + urllib.parse.quote(a.id, safe="")), EXIT_OK
+
+
+def set_status(c, a, op):
+    ids = collect_ids(a)
+    out = {"dry_run": bool(a.dry_run), "changed": 0, "results": []}
+    for i in range(0, len(ids), IDS_PER_REQUEST):
+        r = c.request("POST", "/v1/admin/posts/" + op, body={"ids": ids[i:i + IDS_PER_REQUEST], "dry_run": bool(a.dry_run)})
+        out["changed"] += r["changed"]
+        out["results"] += r["results"]
+    missing = [r["id"] for r in out["results"] if r["result"] in ("not_found", "invalid_id")]
+    return out, (EXIT_NOT_FOUND if missing else EXIT_OK)
+
+
+def cmd_posts_delete(c, a):
+    return set_status(c, a, "delete")
+
+
+def cmd_posts_restore(c, a):
+    return set_status(c, a, "restore")
+
+
+def cmd_maintenance_get(c, a):
+    return c.request("GET", "/v1/admin/maintenance"), EXIT_OK
+
+
+def cmd_maintenance_on(c, a):
+    return c.request("PUT", "/v1/admin/maintenance", body={"maintenance": True, "dry_run": bool(a.dry_run)}), EXIT_OK
+
+
+def cmd_maintenance_off(c, a):
+    return c.request("PUT", "/v1/admin/maintenance", body={"maintenance": False, "dry_run": bool(a.dry_run)}), EXIT_OK
+
+
+def cmd_backup(c, a):
+    dest = os.path.abspath(a.file)
+    if os.path.exists(dest) and not a.force:
+        raise CliError(EXIT_CONFLICT, "file_exists", "%s exists; use --force to overwrite" % dest)
+    resp = c.request("GET", "/v1/admin/backup", raw=True)
+    h = hashlib.sha256()
+    size = 0
+    fd, tmp = tempfile.mkstemp(prefix=".kssw-backup-", dir=os.path.dirname(dest))
+    try:
+        with os.fdopen(fd, "wb") as f, resp:
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                h.update(chunk)
+                size += len(chunk)
+                f.write(chunk)
+        want_len = resp.headers.get("Content-Length")
+        if want_len is not None and int(want_len) != size:
+            raise CliError(EXIT_SERVER, "truncated", "backup truncated: got %d of %s bytes" % (size, want_len))
+        want_sha = (resp.headers.get("X-Content-SHA256") or "").lower()
+        if want_sha and want_sha != h.hexdigest():
+            raise CliError(EXIT_SERVER, "checksum", "backup checksum mismatch")
+        os.replace(tmp, dest)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    return {
+        "file": dest,
+        "bytes": size,
+        "sha256": h.hexdigest(),
+        "sha256_verified": bool(want_sha),
+        "format": resp.headers.get("X-Backup-Format"),
+        "server_filename": _filename(resp.headers.get("Content-Disposition") or ""),
+    }, EXIT_OK
+
+
+def _filename(cd):
+    for part in cd.split(";"):
+        k, _, v = part.strip().partition("=")
+        if k.lower() == "filename":
+            return v.strip('"')
+    return None
+
+
+def cmd_log(c, a):
+    q = [("page", str(a.page)), ("page_size", str(a.page_size)), ("action", a.action)]
+    return c.request("GET", "/v1/admin/log", q), EXIT_OK
+
+
+def token_line(sha):
+    return "'admin_token_sha256' => '%s'," % sha
+
+
+def cmd_token_new(c, a):
+    token = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+    sha = hashlib.sha256(token.encode("ascii")).hexdigest()
+    return {
+        "token": token,
+        "sha256": sha,
+        "config_line": token_line(sha),
+        "note": "keep the token on your machine (KSSW_ADMIN_TOKEN); put only config_line into the server's config.php",
+    }, EXIT_OK
+
+
+def cmd_token_hash(c, a):
+    token = read_token(a) if not a.stdin else sys.stdin.read().strip()
+    if not token:
+        raise CliError(EXIT_USAGE, "missing_token", "no token: set KSSW_ADMIN_TOKEN / --token-file, or pipe it with --stdin")
+    sha = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return {"sha256": sha, "config_line": token_line(sha)}, EXIT_OK
+
+
+# ---- command table ---------------------------------------------------------
+
+# name -> (handler, needs server, help, output description)
+COMMANDS = {}
+
+
+def command(name, handler, server, help_, output):
+    COMMANDS[name] = (handler, server, help_, output)
+
+
+command("capabilities", cmd_capabilities, True, "what this server's admin API supports",
+        "{version, impl, impl_version, features[], operations[], post_filters[], limits{page_size_max, ids_max}, timezone, server_time}")
+command("posts list", cmd_posts_list, True, "list posts, newest first, deleted ones included (filters narrow; AND)",
+        "{items: [post], page, page_size, total, has_more}; post = {id, created_at, status, author, tags[], text, parent_id, root_id}")
+command("posts get", cmd_posts_get, True, "one post, with its text even when deleted", "post")
+command("posts delete", cmd_posts_delete, True, "soft-delete posts (idempotent); exit 3 if any id is unknown",
+        "{dry_run, changed, results: [{id, result: changed|unchanged|not_found|invalid_id, status_before, status_after}]}")
+command("posts restore", cmd_posts_restore, True, "undo deletes (idempotent); exit 3 if any id is unknown", "same as posts delete")
+command("maintenance get", cmd_maintenance_get, True, "whether maintenance mode is on (public writes answer 503)",
+        "{maintenance, since, database: present|missing}")
+command("maintenance on", cmd_maintenance_on, True, "turn maintenance mode on (idempotent)", "{dry_run, changed, maintenance, since, database}")
+command("maintenance off", cmd_maintenance_off, True, "turn maintenance mode off (idempotent)", "{dry_run, changed, maintenance, since, database}")
+command("backup", cmd_backup, True, "download a consistent database snapshot to FILE (written atomically, checksum verified)",
+        "{file, bytes, sha256, sha256_verified, format, server_filename}")
+command("log", cmd_log, True, "the admin log, newest first",
+        "{items: [{id, created_at, action, target, dry_run, result, via}], page, page_size, total, has_more}")
+command("token new", cmd_token_new, False, "make a new admin token and its config.php line (offline; sends nothing)",
+        "{token, sha256, config_line, note}")
+command("token hash", cmd_token_hash, False, "the config.php line for an existing token (offline)", "{sha256, config_line}")
+command("commands", None, False, "describe every command, its arguments and output (machine-readable)",
+        "{program, version, env, exit_codes, global_options, commands: [{name, help, server, args, output}]}")
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise CliError(EXIT_USAGE, "usage", "%s (see %s --help)" % (message, self.prog))
+
+
+def global_options(p, defaults):
+    """The global options, accepted before or after the command. On sub-
+    parsers they default to SUPPRESS so they do not mask the top level."""
+    d = (lambda v: v) if defaults else (lambda v: argparse.SUPPRESS)
+    g = p.add_argument_group("global options")
+    g.add_argument("--url", default=d(None), help="board API base, e.g. https://example.com/bbs/api (env KSSW_URL)")
+    g.add_argument("--token", default=d(None), help="admin token (prefer env KSSW_ADMIN_TOKEN: arguments are visible to other users)")
+    g.add_argument("--token-file", default=d(None), help="read the token from this file (env KSSW_ADMIN_TOKEN_FILE)")
+    g.add_argument("--format", choices=["json", "table"], default=d("json"), help="output format (default json)")
+    g.add_argument("--timeout", type=float, default=d(60.0), help="seconds per request (default 60)")
+    g.add_argument("--allow-http", action="store_true", default=d(False), help="allow plain http to a non-localhost server (tests only)")
+    g.add_argument("--tls-compat", action="store_true", default=d(False), help="accept older TLS cipher suites (RSA key exchange) for hosts that offer nothing else; certificates are still verified (env KSSW_TLS_COMPAT=1)")
+
+
+def build_parser():
+    p = Parser(prog="kssw-admin", description=__doc__.split("\n\n")[0], formatter_class=argparse.RawDescriptionHelpFormatter,
+               epilog="exit codes: " + "; ".join("%s %s" % kv for kv in EXIT_CODES.items()))
+    global_options(p, True)
+    p.add_argument("--version", action="version", version="kssw-admin " + VERSION)
+    sub = p.add_subparsers(dest="cmd", metavar="COMMAND", parser_class=Parser)
+    groups = {}
+
+    def leaf(name):
+        _, _, help_, output = COMMANDS[name]
+        parts = name.split()
+        if len(parts) == 1:
+            sp = sub.add_parser(parts[0], help=help_, description=help_ + ". Output: " + output)
+        else:
+            if parts[0] not in groups:
+                gp = sub.add_parser(parts[0], help="%s commands" % parts[0])
+                groups[parts[0]] = gp.add_subparsers(dest="sub", metavar="SUBCOMMAND", parser_class=Parser)
+            sp = groups[parts[0]].add_parser(parts[1], help=help_, description=help_ + ". Output: " + output)
+        global_options(sp, False)
+        sp.set_defaults(command=name)
+        return sp
+
+    sp = leaf("capabilities")
+    sp = leaf("posts list")
+    sp.add_argument("--q", help="text contains every whitespace-separated term (ASCII case-insensitive)")
+    sp.add_argument("--author", help="author is exactly this")
+    sp.add_argument("--tag", action="append", help="has this tag (repeat: any of them)")
+    sp.add_argument("--status", choices=["active", "deleted", "all"], help="default all")
+    sp.add_argument("--root", metavar="ROOT_ID", help="only this thread")
+    sp.add_argument("--since", help="created at or after (ISO 8601; no offset = server timezone)")
+    sp.add_argument("--until", help="created before (ISO 8601)")
+    sp.add_argument("--page", type=int, default=1)
+    sp.add_argument("--page-size", type=int, default=50, help="1..limits.page_size_max (200)")
+    sp.add_argument("--all", action="store_true", help="follow pages to the end (with --limit N: stop after N posts)")
+    sp.add_argument("--limit", type=int, help="with --all: at most this many posts")
+    sp = leaf("posts get")
+    sp.add_argument("id")
+    for name in ("posts delete", "posts restore"):
+        sp = leaf(name)
+        sp.add_argument("ids", nargs="*", metavar="ID", help="post ids ('-' = read from stdin)")
+        sp.add_argument("--stdin", action="store_true", help="also read ids from stdin: whitespace-separated, or JSON (a posts list result, ids, posts)")
+        sp.add_argument("--dry-run", action="store_true", help="report what would change; change nothing")
+    leaf("maintenance get")
+    for name in ("maintenance on", "maintenance off"):
+        sp = leaf(name)
+        sp.add_argument("--dry-run", action="store_true", help="report what would change; change nothing")
+    sp = leaf("backup")
+    sp.add_argument("file", help="where to write the snapshot (a SQLite file for the PHP server)")
+    sp.add_argument("--force", action="store_true", help="overwrite FILE if it exists")
+    sp = leaf("log")
+    sp.add_argument("--page", type=int, default=1)
+    sp.add_argument("--page-size", type=int, default=50)
+    sp.add_argument("--action", help="only this action (delete, restore, maintenance_on, maintenance_off, backup, login, logout)")
+    leaf("token new")
+    sp = leaf("token hash")
+    sp.add_argument("--stdin", action="store_true", help="read the token from stdin instead of the environment")
+    leaf("commands")
+    return p
+
+
+def describe(parser):
+    """`kssw-admin commands`: the parser, as data."""
+
+    def args_of(sp):
+        out = []
+        for act in sp._actions:
+            if isinstance(act, (argparse._HelpAction, argparse._SubParsersAction)) or act.dest in ("url", "token", "token_file", "format", "timeout", "allow_http"):
+                continue
+            item = {"name": act.option_strings[0] if act.option_strings else act.dest,
+                    "kind": "option" if act.option_strings else "positional",
+                    "help": act.help}
+            if isinstance(act, (argparse._StoreTrueAction,)):
+                item["type"] = "flag"
+            elif isinstance(act, argparse._AppendAction):
+                item["type"] = "string"
+                item["repeatable"] = True
+            else:
+                item["type"] = getattr(act.type, "__name__", "string") if act.type else "string"
+            if act.choices:
+                item["choices"] = list(act.choices)
+            if act.nargs in ("*", "+"):
+                item["repeatable"] = True
+            if act.default not in (None, False, argparse.SUPPRESS) and act.option_strings:
+                item["default"] = act.default
+            if not act.option_strings and act.nargs is None:
+                item["required"] = True
+            out.append(item)
+        return out
+
+    subs = {}
+
+    def walk(p, prefix):
+        for act in p._actions:
+            if isinstance(act, argparse._SubParsersAction):
+                for name, sp in act.choices.items():
+                    full = (prefix + " " + name).strip()
+                    if full in COMMANDS:
+                        subs[full] = sp
+                    walk(sp, full)
+
+    walk(parser, "")
+    cmds = []
+    for name, (_, server, help_, output) in COMMANDS.items():
+        cmds.append({"name": name, "help": help_, "server": server, "args": args_of(subs[name]), "output": output})
+    return {
+        "program": "kssw-admin",
+        "version": VERSION,
+        "usage": "kssw-admin [global options] COMMAND [SUBCOMMAND] [args]; global options may also follow the command",
+        "env": {"KSSW_URL": "board API base URL, e.g. https://example.com/bbs/api",
+                "KSSW_ADMIN_TOKEN": "admin token", "KSSW_ADMIN_TOKEN_FILE": "file holding the admin token",
+                "KSSW_TLS_COMPAT": "1 = accept older TLS cipher suites (same as --tls-compat)"},
+        "global_options": ["--url", "--token", "--token-file", "--format json|table", "--timeout SECONDS", "--allow-http", "--tls-compat"],
+        "output": "stdout: one JSON document; stderr on error: {\"error\": {\"code\", \"message\", \"status\"}}",
+        "exit_codes": EXIT_CODES,
+        "commands": cmds,
+    }
+
+
+# ---- output ----------------------------------------------------------------
+
+
+def cell(v):
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, list):
+        return ", ".join(cell(x) for x in v)
+    if isinstance(v, dict):
+        return json.dumps(v, ensure_ascii=False)
+    s = " ".join(str(v).split())
+    return s if len(s) <= 80 else s[:79] + "…"
+
+
+def table(rows):
+    if not rows:
+        return "(none)"
+    cols = []
+    for r in rows:
+        for k in r:
+            if k not in cols:
+                cols.append(k)
+    cells = [[cell(r.get(c)) for c in cols] for r in rows]
+    width = [max(len(c), *(len(x[i]) for x in cells)) for i, c in enumerate(cols)]
+    lines = ["  ".join(c.ljust(width[i]) for i, c in enumerate(cols)).rstrip()]
+    lines += ["  ".join(x[i].ljust(width[i]) for i in range(len(cols))).rstrip() for x in cells]
+    return "\n".join(lines)
+
+
+def render(doc, fmt):
+    if fmt == "json":
+        return json.dumps(doc, ensure_ascii=False, indent=2)
+    if isinstance(doc, dict):
+        for key in ("items", "results", "commands"):
+            if isinstance(doc.get(key), list):
+                rest = {k: v for k, v in doc.items() if k != key}
+                head = "  ".join("%s=%s" % (k, cell(v)) for k, v in rest.items() if not isinstance(v, (dict, list)))
+                return table(doc[key]) + ("\n" + head if head else "")
+        w = max(len(k) for k in doc) if doc else 0
+        return "\n".join("%s  %s" % (k.ljust(w), cell(v)) for k, v in doc.items())
+    return cell(doc)
+
+
+def fail(err, token):
+    doc = {"error": {"code": err.code, "message": err.message, "status": err.status}}
+    doc["error"].update(err.extra)
+    text = json.dumps(doc, ensure_ascii=False)
+    if token:
+        text = text.replace(token, "***")
+    sys.stderr.write(text + "\n")
+    return err.exit_code
+
+
+def main(argv=None):
+    token = None
+    try:
+        parser = build_parser()
+        a = parser.parse_args(argv)
+        if not getattr(a, "command", None):
+            if getattr(a, "cmd", None):
+                raise CliError(EXIT_USAGE, "usage", "%s needs a subcommand (see kssw-admin %s --help)" % (a.cmd, a.cmd))
+            parser.print_help()
+            return EXIT_USAGE
+        if a.command == "commands":
+            doc, code = describe(parser), EXIT_OK
+        else:
+            handler, server, _, _ = COMMANDS[a.command]
+            token = read_token(a)
+            tls_compat = a.tls_compat or os.environ.get("KSSW_TLS_COMPAT", "") == "1"
+            client = Client(a.url or os.environ.get("KSSW_URL", ""), token, a.timeout, a.allow_http, tls_compat) if server else None
+            doc, code = handler(client, a)
+        out = render(doc, a.format)
+        if token and a.command != "token new":
+            out = out.replace(token, "***")
+        sys.stdout.write(out + "\n")
+        return code
+    except CliError as e:
+        return fail(e, token)
+    except KeyboardInterrupt:
+        return fail(CliError(EXIT_SERVER, "interrupted", "interrupted"), token)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

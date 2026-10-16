@@ -1,0 +1,5 @@
+# The ks-sw-spec revision this implementation is tested against (`make spec`).
+# url: the public repository (works once it is public); override SPEC_URL in
+# make.local meanwhile. commit: bump it together with the code it needs.
+url=https://github.com/kimari-s/ks-sw-spec
+commit=d1af5a88d0916f6859189a6bedc8bb4c3c2451ab
