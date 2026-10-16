@@ -33,27 +33,34 @@ class Page:
 
 
 class AdminClient:
-    def __init__(self, base_url, ip=None):
+    def __init__(self, base_url, ip=None, headers=None):
+        """headers: sent with every request, e.g. X-Forwarded-Proto: https
+        (the server then marks the session cookie Secure; the jar sends it
+        back over the tests' plain http anyway)."""
         self.url = base_url.rstrip("/") + "/admin.php"
         self.jar = http.cookiejar.CookieJar()
         self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.jar), _NoRedirect)
         self.ip = ip or random_ip()
+        self.headers = dict(headers or {})
 
     def request(self, method, query=None, form=None, headers=None):
         url = self.url
         if query:
             url += "?" + urllib.parse.urlencode(query, doseq=True)
         data = None
-        headers = dict({"X-Forwarded-For": self.ip}, **(headers or {}))
+        headers = dict({"X-Forwarded-For": self.ip}, **self.headers, **(headers or {}))
         if form is not None:
             data = urllib.parse.urlencode(form).encode("ascii")
             headers["Content-Type"] = "application/x-www-form-urlencoded"
         req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with self.opener.open(req, timeout=30) as r:
-                return Page(r.status, r.headers, r.read())
+                page = Page(r.status, r.headers, r.read())
         except urllib.error.HTTPError as e:
-            return Page(e.code, e.headers, e.read())
+            page = Page(e.code, e.headers, e.read())
+        for c in self.jar:
+            c.secure = False
+        return page
 
     def get(self, **query):
         return self.request("GET", query=query or None)

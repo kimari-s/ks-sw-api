@@ -46,7 +46,7 @@ help:
 	@echo "                plus the CLI on python:3.8"
 	@echo "  test-php83    same on php:8.3-cli (backup through the file-copy path)"
 	@echo "  test-apache   same behind Apache + .htaccess (docker php:7.4-apache), plus access-denial checks"
-	@echo "  test-admin-disabled  no password hash / token: admin.php 403, /v1/admin/* 404 (php:7.4-cli)"
+	@echo "  test-admin-disabled  no password hash / token: admin.php setup form (also with HTTPS required), /v1/admin/* 404 (php:7.4-cli)"
 	@echo "  test-admin-https     the admin API refuses plain http unless allowed (php:7.4-cli)"
 	@echo "  test-trusted-proxy   behind a trusted TLS-terminating proxy (php:7.4-cli)"
 	@echo "  test-forwarded-proto with trusted_proxies, X-Forwarded-Proto/-Ssl count only from them (php:7.4-cli)"
@@ -94,8 +94,13 @@ test-php74: spec
 test-php83: spec
 	$(call run_cli,php:8.3-cli,8783,php83,-e KSSW_TEST_BACKUP_METHOD=copy,$(SUITES))
 
+# No admin password hash: admin.php is the setup form (tests/admin/test_setup.py,
+# which checks the hash with the bcrypt package); then the same with plain
+# http refused (the form needs HTTPS).
+PYTEST_BCRYPT ?= uv run --no-project --with pytest --with bcrypt pytest -q
 test-admin-disabled: spec
-	$(call run_cli,php:7.4-cli,8775,php74-noadmin,-e KSSW_TEST_ADMIN_DISABLED=1,$(PYTEST) $(CONFORMANCE) tests/admin tests/cli)
+	$(call run_cli,php:7.4-cli,8775,php74-noadmin,-e KSSW_TEST_ADMIN_DISABLED=1,$(PYTEST_BCRYPT) $(CONFORMANCE) tests/admin tests/cli)
+	$(call run_cli,php:7.4-cli,8775,php74-noadmin-https,-e KSSW_TEST_ADMIN_DISABLED=1 -e KSSW_TEST_ADMIN_HTTPS=1,ADMIN_EXPECT_HTTPS=1 $(PYTEST_BCRYPT) tests/admin/test_setup.py)
 
 # Old PHP (XREA defaults to 7.0): index.php and admin.php must answer a
 # clear php_version error instead of a parse error.

@@ -35,7 +35,7 @@ implemented.
    (best outside the document root), timezone, CORS origins for a UI on
    another origin, cooldown, and `admin_token_sha256` for the admin API.
 3. `curl https://example.com/api/v1/meta` →
-   `{"protocol":"kssw","version":"1","profile":"min","impl":"php","impl_version":"0.2.0-alpha.1","features":["active_count","presence"]}`
+   `{"protocol":"kssw","version":"1","profile":"min","impl":"php","impl_version":"0.2.0-alpha.1","impl_url":"https://github.com/kimari-s/ks-sw-api","features":["active_count","presence"]}`
    (plus `"admin"` once a token is configured).
 4. Optionally publish `/.well-known/kssw` at the host root
    ([`well-known/README.md`](well-known/README.md)).
@@ -71,12 +71,29 @@ path answers 404. Code: `lib/admin_api.php` (HTTP) and `lib/admin.php`
 ## Admin page (minimal fallback)
 
 `https://example.com/api/admin.php`: for someone who just wants to remove
-a post from a browser. Plain HTML forms, no JavaScript needed: log in with
-a password, recent posts 50 per page (newest first, deleted ones greyed
-with their text), delete / undelete, log out. Search, maintenance, backup
-and the admin log are in the admin API only.
+a post from a browser, without Python. Plain HTML forms, no JavaScript
+needed: log in with a password, recent posts 50 per page (newest first,
+deleted ones greyed with their text), delete / undelete, log out. Search,
+maintenance, backup and the admin log are in the admin API only.
 
-Setup: it is disabled (403) until `config.php` has a password hash.
+Setup, in the browser: while `admin_password_hash` is empty, `admin.php`
+is a setup form. Type the password twice; the page answers the line for
+`config.php` (`'admin_password_hash' => '$2y$10$...',`) and the steps to
+put it there by FTP (copy `config.example.php` to `config.php` if
+missing, replace the `'admin_password_hash' => '',` line, upload,
+reload). Once the hash is in `config.php`, the form is gone and the page
+is the login.
+
+- It writes no file and stores nothing: the hash is computed
+  (`password_hash`, `PASSWORD_DEFAULT`) and shown once. The only write is
+  the rate limiter's counter in the database.
+- HTTPS only, like the admin API: over plain http it answers 403
+  (except from the server's own machine, or with `admin_allow_http`).
+- Password: at least 12 characters, at most 72 bytes (bcrypt's limit).
+- A CSRF token on the form; at most 10 posts per client IP per 15 minutes
+  (`admin_login_failures`, a counter separate from logins), then `429`.
+
+Or make the hash yourself with PHP:
 
 ```
 php -r 'echo password_hash("your password", PASSWORD_DEFAULT), "\n";'
@@ -85,8 +102,8 @@ php admin.php hash-password
 ```
 
 Put the output in `config.php` as `'admin_password_hash' => '$2y$10$...'`
-(single quotes: the hash contains `$`). Without shell access, run the
-one-liner on any machine with PHP: the hash is portable.
+(single quotes: the hash contains `$`). The hash is portable: any machine
+with PHP can make it.
 
 Security: a PHP session cookie (`kssw_admin`; HttpOnly, SameSite=Strict,
 Secure under HTTPS; ends after `admin_session_minutes` idle minutes), a

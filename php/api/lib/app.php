@@ -11,6 +11,8 @@ const KSSW_PROTOCOL = 'kssw';
 const KSSW_PROTOCOL_VERSION = '1';
 const KSSW_PROFILE = 'min';
 const KSSW_IMPL = 'php';
+// Where this implementation's source is (/v1/meta impl_url).
+const KSSW_IMPL_URL = 'https://github.com/kimari-s/ks-sw-api';
 
 final class App
 {
@@ -293,6 +295,7 @@ final class App
             'profile' => KSSW_PROFILE,
             'impl' => KSSW_IMPL,
             'impl_version' => KSSW_VERSION,
+            'impl_url' => KSSW_IMPL_URL,
             'features' => self::features($this->cfg),
         ];
     }

@@ -5,7 +5,7 @@
 //
 // Environment (php -S runs only; mod_php does not see -e variables):
 //   KSSW_TEST_ADMIN_DISABLED=1   no admin_password_hash and no admin token
-//                                (admin.php answers 403, /v1/admin/* 404)
+//                                (admin.php is the setup form, /v1/admin/* 404)
 //   KSSW_TEST_ADMIN_HTTPS=1      the admin API refuses plain http
 //   KSSW_TEST_BACKUP_METHOD=copy force the file-copy backup path
 //   KSSW_TEST_FORWARDED=trusted|untrusted

@@ -133,9 +133,12 @@ final class AdminOps
 
     // ---- failed authentications -------------------------------------
 
-    public function ipHmac(string $ip): string
+    // $kind keeps separate counters in the same table: 'ip' for failed
+    // authentications (API tokens and page logins), 'setup-ip' for the
+    // password setup form of admin.php (every post counts).
+    public function ipHmac(string $ip, string $kind = 'ip'): string
     {
-        return $this->db()->key('ip', $ip);
+        return $this->db()->key($kind, $ip);
     }
 
     /** @return array{0: int, 1: int} failures in the window, seconds until the oldest expires */

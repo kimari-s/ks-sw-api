@@ -7,13 +7,14 @@ from admin_client import TokenClient
 pytestmark = pytest.mark.disabled
 
 
-def test_page_disabled_without_hash(anon):
+def test_page_setup_without_hash(anon):
+    # admin.php shows the password setup form (test_setup.py), no login.
     r = anon.get()
+    assert r.status == 200, r
+    assert 'value="setup"' in r.text and 'value="login"' not in r.text
+    r = anon.post({"action": "login", "password": "x", "csrf": r.csrf()})
     assert r.status == 403, r
-    assert "admin_password_hash" in r.text
-    r = anon.post({"action": "login", "password": "x", "csrf": "x"})
-    assert r.status == 403, r
-    assert anon.session_id() is None  # no session is started at all
+    assert 'value="setup"' in r.text
 
 
 @pytest.mark.parametrize("path", ["/v1/admin/capabilities", "/v1/admin/posts", "/v1/admin", "/v1/admin/nope"])

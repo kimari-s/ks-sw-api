@@ -14,7 +14,7 @@ done
 # The DB file itself, wherever it would land by default.
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/data/kssw.sqlite3")
 case $code in 403 | 404) echo "denied  $code  data/kssw.sqlite3" ;; *) echo "SERVED  $code  data/kssw.sqlite3" >&2; fail=1 ;; esac
-# admin.php must stay reachable (200: login page; 403: admin disabled).
+# admin.php must stay reachable (200: login page or setup form; 403: setup over plain http).
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/admin.php")
 case $code in 200 | 403) echo "served  $code  admin.php" ;; *) echo "BLOCKED $code  admin.php" >&2; fail=1 ;; esac
 exit $fail

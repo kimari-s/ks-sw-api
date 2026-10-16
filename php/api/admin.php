@@ -4,8 +4,10 @@
 // is the admin API (/v1/admin/..., tools/kssw-admin). Specific to this PHP
 // implementation; not part of the kssw protocol.
 //
-// Disabled (403) until admin_password_hash is set in config.php. To make
-// the hash:  php admin.php hash-password   (reads the password on stdin)
+// Until admin_password_hash is set in config.php it shows a setup form
+// (HTTPS only) that computes the config.php line from a password typed in
+// the browser; nothing is written. Or make the hash with PHP:
+//            php admin.php hash-password   (reads the password on stdin)
 //       or:  php -r 'echo password_hash("your password", PASSWORD_DEFAULT), "\n";'
 //
 // Like index.php, this file stays parseable by old PHP and checks the

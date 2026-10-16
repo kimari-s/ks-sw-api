@@ -2,4 +2,4 @@
 # url: the public repository (works once it is public); override SPEC_URL in
 # make.local meanwhile. commit: bump it together with the code it needs.
 url=https://github.com/kimari-s/ks-sw-spec
-commit=4082c5c243807125f5d6a03ef104c955895631a1
+commit=71ef9270b138d9fdad4c4f1c189a103455bc5163

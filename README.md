@@ -23,12 +23,12 @@ tests/cli/          tests of tools/kssw-admin against a live server
 `GET /v1/meta` says what a server implements (kssw spec §7.1), e.g.
 
 ```json
-{"protocol":"kssw","version":"1","profile":"min","impl":"php","impl_version":"0.2.0-alpha.1","features":["active_count","admin","presence"]}
+{"protocol":"kssw","version":"1","profile":"min","impl":"php","impl_version":"0.2.0-alpha.1","impl_url":"https://github.com/kimari-s/ks-sw-api","features":["active_count","admin","presence"]}
 ```
 
 - `protocol` / `version`: kssw, protocol version 1. `profile`: the
   conformance class (`min` here).
-- `impl` / `impl_version`: this implementation and its release.
+- `impl` / `impl_version` / `impl_url`: this implementation, its release and its source.
 - `features`: optional parts of the protocol this server implements; a
   client calls them only when listed.
 
@@ -59,7 +59,34 @@ Planned, not built yet: a no-JavaScript HTML view of the board and an RSS
 feed, both served by the API itself. There is no spam filter in this
 version.
 
-## Administration (for AI agents)
+## Administration
+
+Two ways, from the operator's side:
+
+| | needs | can do |
+|---|---|---|
+| **Minimal administration without Python**: `admin.php` in a browser | a browser; HTTPS | log in with a password, recent posts, delete / undelete |
+| **Full administration with the CLI (Python 3.8+)**: `tools/kssw-admin` | Python 3.8+ on your computer | everything: search, bulk delete / restore, maintenance mode, backup, the admin log; JSON output for AI agents |
+
+Python is usually already there on Linux. On **Windows and macOS it
+usually has to be installed first** (python.org, or the Microsoft Store on
+Windows); if that is a hurdle, start with `admin.php`.
+
+### Minimal administration without Python
+
+Open `https://<your host>/<api folder>/admin.php`. While no password is
+set up, it shows a setup form: type a password (at least 12 characters)
+twice, and the page shows the exact line to put into `config.php`, e.g.
+`'admin_password_hash' => '$2y$10$...',`, with the steps: copy
+`config.example.php` to `config.php` by FTP if there is none, replace the
+line `'admin_password_hash' => '',` with the shown one, upload, reload.
+The page then is the login. It writes no file and stores nothing on the
+server (the password is not kept; only its hash goes into `config.php`,
+by your hand). The form works only over HTTPS (or from the server's own
+machine), needs the CSRF token of the page, and answers at most 10 posts
+per IP per 15 minutes. Details: [php/README.md](php/README.md), "Admin page".
+
+### Full administration with the CLI (for people and AI agents)
 
 The board is administered through the **admin API** (`/v1/admin/...`, the
 kssw admin API: ks-sw-spec `openapi/kssw-admin.openapi.yaml`) with the CLI
@@ -68,10 +95,7 @@ the agent's) machine, never on the server: one Python 3.8+ file, standard
 library only, no install. Everything it prints is JSON, so an AI agent can
 drive it directly.
 
-`admin.php` (password login, recent posts, delete / undelete) is only a
-minimal fallback for people without the CLI; see [php/README.md](php/README.md).
-
-### Setup
+#### Setup
 
 1. Make a token, on your own machine (nothing is sent anywhere):
 
@@ -101,7 +125,7 @@ Without `admin_token_sha256` every `/v1/admin/...` path answers 404 and
 within 15 minutes block that IP for the rest of the window (`429`); failed
 `admin.php` logins count too.
 
-### Environment
+#### Environment
 
 | variable | meaning |
 |---|---|
@@ -114,7 +138,7 @@ Global options (before or after the command): `--url`, `--token`,
 (only `token new` prints the token it makes), redirects are never followed
 (they would carry the token elsewhere), and nothing ever prompts.
 
-### Output and exit codes
+#### Output and exit codes
 
 stdout: one JSON document per invocation (`--format table` for people).
 On error, stdout is empty and stderr holds one JSON document:
@@ -138,7 +162,7 @@ the HTTP status or null.
 | 4 | conflict or maintenance state (409, 503); `backup` target file exists |
 | 5 | server error, network error, unexpected response (5xx, other) |
 
-### Commands
+#### Commands
 
 `kssw-admin commands` prints all of this as JSON (every command, its
 arguments and output shape, the exit codes); `--help` works on every
@@ -228,7 +252,7 @@ $ kssw-admin log --page-size 1
 line; or the line for an existing token (`KSSW_ADMIN_TOKEN`, or `--stdin`).
 Offline.
 
-### For the operator: a prompt for your agent
+#### For the operator: a prompt for your agent
 
 Paste this (with your URL) into your AI agent's instructions:
 

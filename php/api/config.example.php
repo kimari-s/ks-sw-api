@@ -61,8 +61,10 @@ return [
     // itself. true allows it from anywhere: tests only.
     'admin_allow_http' => false,
 
-    // admin.php (the minimal HTML admin page) login. '' disables admin.php
-    // (it answers 403). Set the output of:
+    // admin.php (the minimal HTML admin page) login. While it is '',
+    // admin.php shows a setup form (over HTTPS) that makes this whole line
+    // from a password you type in the browser; replace the line below with
+    // it. Or set the output of:
     //   php -r 'echo password_hash("your password", PASSWORD_DEFAULT), "\n";'
     // (or: php admin.php hash-password, which reads the password on stdin).
     'admin_password_hash' => '',
