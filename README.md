@@ -47,8 +47,8 @@ maintenance mode; reads keep working.
 What kssw leaves out on purpose: accounts and cookies, bots, automatic
 tagging, translation, federation and web analytics. A poster is just a
 name (`author`); tags are plain strings. Posts are at most 5,000
-characters; one post per 30 s per browser (`client_id`) and per IP, which
-is stored only as a keyed hash. The participant count (`active_count`)
+characters; by default one post per 5 s (`post_cooldown`) per browser
+(`client_id`) and per IP, which is stored only as a keyed hash. The participant count (`active_count`)
 comes from presence heartbeats kept for an hour at most.
 
 Discovery: the API answers `GET <API base>/.well-known/kssw`; to put the

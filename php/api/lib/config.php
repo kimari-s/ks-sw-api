@@ -10,7 +10,7 @@ function kssw_config(string $apiDir): array
     $defaults = [
         'db_path' => $apiDir . '/data/kssw.sqlite3',
         'timezone' => 'Asia/Tokyo',
-        'post_cooldown' => 30,
+        'post_cooldown' => 5,
         'cors_origins' => [],
         'trust_forwarded_for' => false,
         'trusted_proxies' => [],

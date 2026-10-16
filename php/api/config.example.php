@@ -13,7 +13,7 @@ return [
     'timezone' => 'Asia/Tokyo',
 
     // Seconds between posts, per client_id and per client IP. 0 disables.
-    'post_cooldown' => 30,
+    'post_cooldown' => 5,
 
     // Browser origins allowed to call the API (CORS). [] = no CORS headers
     // (same-origin UI only); ['*'] = any origin.
