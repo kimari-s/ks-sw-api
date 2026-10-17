@@ -67,6 +67,9 @@ final class AdminApi
             if ($this->cfg['admin_token_invalid']) {
                 throw new HttpError(500, 'admin_token_sha256 in config.php must be 64 hex characters (kssw-admin token new)', [], 'config_invalid');
             }
+            if ($this->cfg['admin_token_example']) {
+                throw new HttpError(500, 'admin_token_sha256 in config.php is the sample from the documentation; make your own (kssw-admin token new)', [], 'config_invalid');
+            }
             if (!$this->cfg['admin_allow_http'] && !$this->req->https() && !$this->req->fromLocalhost()) {
                 throw new HttpError(403, 'the admin API needs HTTPS', [], 'https_required');
             }

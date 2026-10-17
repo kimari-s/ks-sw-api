@@ -102,9 +102,9 @@ drive it directly.
 	```
 	$ tools/kssw-admin token new
 	{
-	  "token": "3iSmaIsekLlx73TkCofCNMVl55RywNuFKZp1Hmj_Ppo",
-	  "sha256": "c3ddb18a7580a45c201233d337cd46750c7278bf5fce759e9f0fb26a3a0a5ccd",
-	  "config_line": "'admin_token_sha256' => 'c3ddb18a7580a45c201233d337cd46750c7278bf5fce759e9f0fb26a3a0a5ccd',",
+	  "token": "<43 random characters: your token>",
+	  "sha256": "<64 hex characters>",
+	  "config_line": "'admin_token_sha256' => '<64 hex characters>',",
 	  "note": "keep the token on your machine (KSSW_ADMIN_TOKEN); put only config_line into the server's config.php"
 	}
 	```

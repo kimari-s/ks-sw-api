@@ -56,6 +56,10 @@ function kssw_config(string $apiDir): array
     $th = strtolower(trim((string) $cfg['admin_token_sha256']));
     $cfg['admin_token_invalid'] = $th !== '' && !preg_match('/^[0-9a-f]{64}$/', $th);
     $cfg['admin_token_sha256'] = $th;
+    // The hash of the sample token an earlier README showed: its token is
+    // public, so a config.php pasted from that page must not open the admin
+    // API (500 config_invalid, like a malformed hash).
+    $cfg['admin_token_example'] = $th === 'c3ddb18a7580a45c201233d337cd46750c7278bf5fce759e9f0fb26a3a0a5ccd';
     $cfg['admin_allow_http'] = (bool) $cfg['admin_allow_http'];
     $cfg['discovery_base'] = trim((string) $cfg['discovery_base']);
     $cfg['discovery_name'] = trim((string) $cfg['discovery_name']);
